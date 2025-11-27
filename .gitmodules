@@ -1,0 +1,9 @@
+[submodule "seamless-base"]
+	path = seamless-base
+	url = https://github.com/sjdv1982/seamless-base
+[submodule "seamless-transformer"]
+	path = seamless-transformer
+	url = https://github.com/sjdv1982/seamless-transformer
+[submodule "seamless-config"]
+	path = seamless-config
+	url = https://github.com/sjdv1982/seamless-config

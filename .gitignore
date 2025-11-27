@@ -1,0 +1,4 @@
+*.code-workspace
+.vscode/
+*.pyc
+*.egg-info/

@@ -1,0 +1,11 @@
+name: seamless-jobserver
+channels:
+  - conda-forge
+dependencies:
+  - aiohttp
+  - pip
+  - pip:
+      - -e .
+      - -e ./seamless-base
+      - -e ./seamless-transformer
+      - -e ./seamless-config

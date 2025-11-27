@@ -3,6 +3,9 @@ channels:
   - conda-forge
 dependencies:
   - aiohttp
+  - aiofiles
+  - frozendict
+  - pyyaml
   - pip
   - pip:
       - -e .

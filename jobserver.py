@@ -1,0 +1,285 @@
+from aiohttp import web
+import asyncio
+import contextlib
+import json
+import os
+import random
+import signal
+import socket
+import sys
+import time
+
+
+STATUS_FILE_WAIT_TIMEOUT = 20.0
+INACTIVITY_CHECK_INTERVAL = 1.0
+
+status_tracker = None
+
+
+def is_port_in_use(address, port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex((address, port)) == 0
+
+
+def wait_for_status_file(path: str, timeout: float = STATUS_FILE_WAIT_TIMEOUT):
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with open(path, "r", encoding="utf-8") as status_stream:
+                contents = json.load(status_stream)
+                break
+        except FileNotFoundError:
+            if time.monotonic() >= deadline:
+                print(
+                    f"Status file '{path}' not found after {int(timeout)} seconds",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            time.sleep(0.1)
+            continue
+        except json.JSONDecodeError as exc:
+            print(
+                f"Status file '{path}' is not valid JSON: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    if not isinstance(contents, dict):
+        print(
+            f"Status file '{path}' must contain a JSON object",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return contents
+
+
+class StatusFileTracker:
+    def __init__(self, path: str, base_contents: dict, port: int):
+        self.path = path
+        self._base_contents = dict(base_contents)
+        self.port = port
+        self.running_written = False
+
+    def _write(self, payload: dict):
+        tmp_path = f"{self.path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as status_stream:
+            json.dump(payload, status_stream)
+            status_stream.write("\n")
+        os.replace(tmp_path, self.path)
+
+    def write_running(self):
+        payload = dict(self._base_contents)
+        payload["port"] = self.port
+        payload["status"] = "running"
+        self._write(payload)
+        self._base_contents = payload
+        self.running_written = True
+
+    def write_failed(self):
+        payload = dict(self._base_contents)
+        payload["status"] = "failed"
+        self._write(payload)
+
+
+def raise_startup_error(exc: BaseException):
+    if status_tracker and not status_tracker.running_written:
+        status_tracker.write_failed()
+    raise exc
+
+
+def pick_random_free_port(host: str, start: int, end: int) -> int:
+    if start < 0 or end > 65535:
+        raise RuntimeError("--port-range values must be between 0 and 65535")
+    if start > end:
+        raise RuntimeError("--port-range START must be less than or equal to END")
+
+    span = end - start + 1
+    attempted = set()
+    while len(attempted) < span:
+        port = random.randint(start, end)
+        if port in attempted:
+            continue
+        attempted.add(port)
+        try:
+            with socket.create_server((host, port), reuse_port=False):
+                pass
+        except OSError:
+            continue
+        return port
+
+    raise RuntimeError(f"No free port available in range {start}-{end}")
+
+
+class JobServer:
+    future = None
+
+    def __init__(
+        self,
+        host,
+        port,
+        *,
+        timeout_seconds=None,
+        status_tracker=None,
+    ):
+        self.host = host
+        self.port = port
+        self._timeout_seconds = timeout_seconds
+        self._status_tracker = status_tracker
+        self._timeout_task = None
+        self._last_request = None
+        self._runner = None
+        self._site = None
+
+    async def _start(self):
+        if is_port_in_use(self.host, self.port):
+            print("ERROR: %s port %d already in use" % (self.host, self.port))
+            raise Exception
+
+        app = web.Application(client_max_size=10e9)
+        app.add_routes(
+            [
+                web.get("/", self._welcome),
+                web.get("/healthcheck", self._healthcheck),
+            ]
+        )
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, self.host, self.port)
+        await site.start()
+        self._runner = runner
+        self._site = site
+        if self._status_tracker and not self._status_tracker.running_written:
+            self._status_tracker.write_running()
+        print(f"Welcome to the Seamless jobserver on {self.host}:{self.port}")
+        sys.stdout.flush()
+        if self._timeout_seconds is not None:
+            self._last_request = time.monotonic()
+            loop = asyncio.get_running_loop()
+            self._timeout_task = loop.create_task(self._monitor_inactivity())
+
+    def start(self):
+        if self.future is not None:
+            return
+        coro = self._start()
+        self.future = asyncio.ensure_future(coro)
+
+    async def stop(self):
+        if self._timeout_task:
+            self._timeout_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._timeout_task
+            self._timeout_task = None
+        if self._site is not None:
+            await self._site.stop()
+            self._site = None
+        if self._runner is not None:
+            await self._runner.cleanup()
+            self._runner = None
+
+    async def _monitor_inactivity(self):
+        try:
+            while True:
+                await asyncio.sleep(INACTIVITY_CHECK_INTERVAL)
+                if self._last_request is None:
+                    continue
+                if time.monotonic() - self._last_request >= self._timeout_seconds:
+                    loop = asyncio.get_running_loop()
+                    loop.call_soon(loop.stop)
+                    break
+        except asyncio.CancelledError:
+            raise
+
+    def _register_activity(self):
+        if self._timeout_seconds is not None:
+            self._last_request = time.monotonic()
+
+    async def _healthcheck(self, _):
+        self._register_activity()
+        return web.Response(status=200, body="OK")
+
+    async def _welcome(self, _):
+        self._register_activity()
+        return web.Response(status=200, body="Seamless jobserver is running")
+
+
+def main():
+    import argparse
+
+    p = argparse.ArgumentParser()
+    port_group = p.add_mutually_exclusive_group()
+    port_group.add_argument("--port", type=int, help="Network port")
+    port_group.add_argument(
+        "--port-range",
+        type=int,
+        nargs=2,
+        metavar=("START", "END"),
+        help="Inclusive port range to select a random free port from",
+    )
+    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument(
+        "--status-file",
+        type=str,
+        help="JSON file used to report server status",
+    )
+    p.add_argument(
+        "--timeout",
+        type=float,
+        help="Stop the server after this many seconds of inactivity",
+    )
+    args = p.parse_args()
+
+    global status_tracker
+
+    selected_port = args.port if args.port is not None else 5533
+    status_file_path = args.status_file
+    status_tracker = None
+    if status_file_path:
+        status_file_contents = wait_for_status_file(status_file_path)
+        status_tracker = StatusFileTracker(
+            status_file_path, status_file_contents, args.port
+        )
+
+    if args.port_range:
+        start, end = args.port_range
+        try:
+            selected_port = pick_random_free_port(args.host, start, end)
+        except BaseException as exc:
+            raise_startup_error(exc)
+    if status_tracker:
+        status_tracker.port = selected_port
+
+    timeout_seconds = args.timeout
+    if timeout_seconds is not None and timeout_seconds <= 0:
+        raise_startup_error(RuntimeError("--timeout must be a positive number"))
+
+    def raise_system_exit(*args, **kwargs):
+        raise SystemExit
+
+    signal.signal(signal.SIGTERM, raise_system_exit)
+    signal.signal(signal.SIGHUP, raise_system_exit)
+    signal.signal(signal.SIGINT, raise_system_exit)
+
+    job_server = JobServer(
+        args.host,
+        selected_port,
+        timeout_seconds=timeout_seconds,
+        status_tracker=status_tracker,
+    )
+    job_server.start()
+
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_forever()
+    except KeyboardInterrupt:
+        pass
+    except BaseException:
+        if status_tracker and not status_tracker.running_written:
+            status_tracker.write_failed()
+        raise
+    finally:
+        loop.run_until_complete(job_server.stop())
+
+
+if __name__ == "__main__":
+    main()

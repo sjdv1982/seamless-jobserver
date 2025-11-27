@@ -9,3 +9,4 @@ dependencies:
       - -e ./seamless-base
       - -e ./seamless-transformer
       - -e ./seamless-config
+      - -e ./seamless-remote

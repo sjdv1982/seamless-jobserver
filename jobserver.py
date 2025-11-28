@@ -9,6 +9,9 @@ import socket
 import sys
 import time
 
+from seamless import Checksum
+from seamless_transformer import worker
+
 
 STATUS_FILE_WAIT_TIMEOUT = 20.0
 INACTIVITY_CHECK_INTERVAL = 1.0
@@ -141,6 +144,7 @@ class JobServer:
             [
                 web.get("/", self._welcome),
                 web.get("/healthcheck", self._healthcheck),
+                web.get("/run-transformation", self._run_transformation),
             ]
         )
         runner = web.AppRunner(app)
@@ -202,6 +206,37 @@ class JobServer:
         self._register_activity()
         return web.Response(status=200, body="Seamless jobserver is running")
 
+    async def _run_transformation(self, request):
+        self._register_activity()
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+        try:
+            transformation_dict = payload["transformation_dict"]
+            tf_checksum = Checksum(payload["tf_checksum"])
+            tf_dunder = payload.get("tf_dunder", {})
+            scratch = bool(payload.get("scratch", False))
+        except Exception as exc:
+            return web.Response(status=400, text=f"Invalid payload: {exc}")
+
+        try:
+            result_checksum = await worker.dispatch_to_workers(
+                transformation_dict,
+                tf_checksum=tf_checksum,
+                tf_dunder=tf_dunder,
+                scratch=scratch,
+            )
+        except Exception as exc:
+            return web.Response(status=500, text=str(exc))
+
+        if isinstance(result_checksum, str):
+            return web.Response(status=500, text=result_checksum)
+
+        result_checksum = Checksum(result_checksum)
+        return web.Response(status=200, text=result_checksum.hex())
+
 
 def main():
     import argparse
@@ -234,8 +269,10 @@ def main():
     selected_port = args.port if args.port is not None else 5533
     status_file_path = args.status_file
     status_tracker = None
+    parameters = {}
     if status_file_path:
         status_file_contents = wait_for_status_file(status_file_path)
+        parameters = status_file_contents.get("parameters", {}) or {}
         status_tracker = StatusFileTracker(
             status_file_path, status_file_contents, args.port
         )
@@ -259,6 +296,15 @@ def main():
     signal.signal(signal.SIGTERM, raise_system_exit)
     signal.signal(signal.SIGHUP, raise_system_exit)
     signal.signal(signal.SIGINT, raise_system_exit)
+
+    try:
+        worker.spawn(1)
+        if parameters:
+            from seamless_config.extern_clients import set_remote_clients
+
+            set_remote_clients(parameters)
+    except BaseException as exc:
+        raise_startup_error(exc)
 
     job_server = JobServer(
         args.host,

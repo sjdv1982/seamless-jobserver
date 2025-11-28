@@ -6,6 +6,8 @@ dependencies:
   - aiofiles
   - frozendict
   - pyyaml
+  - numpy
+  - orjson
   - pip
   - pip:
       - -e .

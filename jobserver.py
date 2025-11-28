@@ -9,8 +9,14 @@ import socket
 import sys
 import time
 
-from seamless import Checksum, Buffer
+from seamless import Checksum
 from seamless_transformer import worker
+import seamless
+
+try:
+    from seamless_remote.client import close_all_clients as _close_all_clients
+except ImportError:
+    _close_all_clients = None
 
 
 STATUS_FILE_WAIT_TIMEOUT = 20.0
@@ -238,7 +244,6 @@ class JobServer:
 
         result_checksum = Checksum(result_checksum)
         result_buf = await result_checksum.resolution()
-        assert isinstance(result_buf, Buffer)
         await result_buf.write()
         print(
             f"[jobserver] Completed transformation {tf_checksum_hex} -> {result_checksum.hex()}",
@@ -334,6 +339,22 @@ def main():
         raise
     finally:
         loop.run_until_complete(job_server.stop())
+        closed_ok = False
+        try:
+            seamless.close()
+            closed_ok = True
+        except Exception:
+            pass
+        if not closed_ok:
+            try:
+                worker.shutdown_workers()
+            except Exception:
+                pass
+            if _close_all_clients is not None:
+                try:
+                    _close_all_clients()
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":

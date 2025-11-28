@@ -171,8 +171,17 @@ class JobServer:
     def start(self):
         if self.future is not None:
             return
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        else:
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
         coro = self._start()
-        self.future = asyncio.ensure_future(coro)
+        self.future = loop.create_task(coro)
 
     async def stop(self):
         if self._timeout_task:

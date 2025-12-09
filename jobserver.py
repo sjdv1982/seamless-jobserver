@@ -12,6 +12,7 @@ import time
 from seamless import Checksum
 from seamless_transformer import worker
 import seamless
+from seamless.util.get_event_loop import get_event_loop
 
 try:
     from seamless_remote.client import close_all_clients as _close_all_clients
@@ -171,15 +172,10 @@ class JobServer:
     def start(self):
         if self.future is not None:
             return
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
+        loop = get_event_loop()
+        if loop.is_closed():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-        else:
-            if loop.is_closed():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
         coro = self._start()
         self.future = loop.create_task(coro)
 
@@ -337,7 +333,7 @@ def main():
     )
     job_server.start()
 
-    loop = asyncio.get_event_loop()
+    loop = get_event_loop()
     try:
         loop.run_forever()
     except KeyboardInterrupt:

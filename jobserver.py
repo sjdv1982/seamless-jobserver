@@ -10,7 +10,7 @@ import sys
 import time
 
 from seamless import Checksum
-from seamless_transformer import worker
+from seamless.transformer import worker
 import seamless
 from seamless.util.get_event_loop import get_event_loop
 

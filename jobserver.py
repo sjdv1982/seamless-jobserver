@@ -10,7 +10,8 @@ import sys
 import time
 
 from seamless import Checksum
-from seamless.transformer import worker
+from seamless.transformer import spawn
+from seamless_transformer import worker
 import seamless
 from seamless.util.get_event_loop import get_event_loop
 
@@ -317,9 +318,9 @@ def main():
     signal.signal(signal.SIGINT, raise_system_exit)
 
     try:
-        worker.spawn(1)
+        spawn(1)
         if parameters:
-            from seamless_config.extern_clients import set_remote_clients
+            from seamless.config import set_remote_clients
 
             set_remote_clients(parameters)
     except BaseException as exc:

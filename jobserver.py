@@ -282,6 +282,12 @@ def main():
         type=float,
         help="Stop the server after this many seconds of inactivity",
     )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of worker processes to spawn",
+    )
     args = p.parse_args()
 
     global status_tracker
@@ -309,6 +315,8 @@ def main():
     timeout_seconds = args.timeout
     if timeout_seconds is not None and timeout_seconds <= 0:
         raise_startup_error(RuntimeError("--timeout must be a positive number"))
+    if args.workers is not None and args.workers <= 0:
+        raise_startup_error(RuntimeError("--workers must be a positive integer"))
 
     def raise_system_exit(*args, **kwargs):
         raise SystemExit
@@ -318,7 +326,7 @@ def main():
     signal.signal(signal.SIGINT, raise_system_exit)
 
     try:
-        spawn(1)
+        spawn(args.workers)
         if parameters:
             from seamless.config import set_remote_clients
 

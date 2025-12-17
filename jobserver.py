@@ -252,7 +252,6 @@ class JobServer:
         if not scratch:
             result_buf = await result_checksum.resolution()
             assert isinstance(result_buf, Buffer)
-            await result_buf.write()
         print(
             f"[jobserver] Completed transformation {tf_checksum_hex} -> {result_checksum.hex()}",
             flush=True,

@@ -9,7 +9,7 @@ import socket
 import sys
 import time
 
-from seamless import Checksum
+from seamless import Checksum, Buffer
 from seamless.transformer import spawn
 from seamless_transformer import worker
 import seamless
@@ -249,8 +249,10 @@ class JobServer:
             return web.Response(status=500, text=result_checksum)
 
         result_checksum = Checksum(result_checksum)
-        result_buf = await result_checksum.resolution()
-        await result_buf.write()
+        if not scratch:
+            result_buf = await result_checksum.resolution()
+            assert isinstance(result_buf, Buffer)
+            await result_buf.write()
         print(
             f"[jobserver] Completed transformation {tf_checksum_hex} -> {result_checksum.hex()}",
             flush=True,

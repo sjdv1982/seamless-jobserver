@@ -12,6 +12,7 @@ import time
 from seamless import Checksum, Buffer
 from seamless.transformer import spawn
 from seamless_transformer import worker
+from seamless_transformer.remote_job import parse_remote_job_written
 import seamless
 from seamless.util.get_event_loop import get_event_loop
 
@@ -246,6 +247,13 @@ class JobServer:
             return web.Response(status=500, text=str(exc))
 
         if isinstance(result_checksum, str):
+            remote_job_dir = parse_remote_job_written(result_checksum)
+            if remote_job_dir is not None:
+                print(
+                    f"[jobserver] Prepared transformation {tf_checksum_hex} in {remote_job_dir}",
+                    flush=True,
+                )
+                return web.Response(status=200, text=result_checksum)
             return web.Response(status=500, text=result_checksum)
 
         result_checksum = Checksum(result_checksum)

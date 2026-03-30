@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "seamless-jobserver"
-version = "0.0.0"
-description = "Dummy Seamless jobserver implementation"
+version = "0.1.1"
+description = "Simple Seamless jobserver implementation"
 requires-python = ">=3.9"
 dependencies = [
     "aiohttp",

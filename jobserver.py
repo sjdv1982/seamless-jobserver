@@ -24,6 +24,11 @@ except ImportError:
 
 STATUS_FILE_WAIT_TIMEOUT = 20.0
 INACTIVITY_CHECK_INTERVAL = 1.0
+_RESTARTABLE_REMOTE_CLIENT_ERROR_MARKERS = (
+    "device or resource busy",
+    "clientrestartrequirederror",
+    "[errno 16]",
+)
 
 status_tracker = None
 
@@ -31,6 +36,15 @@ status_tracker = None
 def is_port_in_use(address, port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex((address, port)) == 0
+
+
+def _is_restartable_remote_client_error_text(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    if parse_remote_job_written(value) is not None:
+        return False
+    lower = value.lower()
+    return any(marker in lower for marker in _RESTARTABLE_REMOTE_CLIENT_ERROR_MARKERS)
 
 
 def wait_for_status_file(path: str, timeout: float = STATUS_FILE_WAIT_TIMEOUT):
@@ -236,25 +250,45 @@ class JobServer:
 
         tf_checksum_hex = tf_checksum.hex()
         print(f"[jobserver] Received transformation {tf_checksum_hex}", flush=True)
-        try:
-            result_checksum = await worker.dispatch_to_workers(
-                transformation_dict,
-                tf_checksum=tf_checksum,
-                tf_dunder=tf_dunder,
-                scratch=scratch,
-            )
-        except Exception as exc:
-            return web.Response(status=500, text=str(exc))
-
-        if isinstance(result_checksum, str):
-            remote_job_dir = parse_remote_job_written(result_checksum)
-            if remote_job_dir is not None:
-                print(
-                    f"[jobserver] Prepared transformation {tf_checksum_hex} in {remote_job_dir}",
-                    flush=True,
+        result_checksum = None
+        for attempt in range(2):
+            try:
+                result_checksum = await worker.dispatch_to_workers(
+                    transformation_dict,
+                    tf_checksum=tf_checksum,
+                    tf_dunder=tf_dunder,
+                    scratch=scratch,
                 )
-                return web.Response(status=200, text=result_checksum)
-            return web.Response(status=500, text=result_checksum)
+            except Exception as exc:
+                error_text = str(exc)
+                if attempt == 0 and _is_restartable_remote_client_error_text(error_text):
+                    print(
+                        f"[jobserver] Retrying transformation {tf_checksum_hex} after restartable remote-client failure",
+                        flush=True,
+                    )
+                    continue
+                return web.Response(status=500, text=error_text)
+
+            if isinstance(result_checksum, str):
+                remote_job_dir = parse_remote_job_written(result_checksum)
+                if remote_job_dir is not None:
+                    print(
+                        f"[jobserver] Prepared transformation {tf_checksum_hex} in {remote_job_dir}",
+                        flush=True,
+                    )
+                    return web.Response(status=200, text=result_checksum)
+                if attempt == 0 and _is_restartable_remote_client_error_text(
+                    result_checksum
+                ):
+                    print(
+                        f"[jobserver] Retrying transformation {tf_checksum_hex} after restartable remote-client failure",
+                        flush=True,
+                    )
+                    continue
+                return web.Response(status=500, text=result_checksum)
+            break
+
+        assert result_checksum is not None
 
         result_checksum = Checksum(result_checksum)
         if not scratch:

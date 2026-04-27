@@ -292,6 +292,7 @@ class JobServer:
         wall_start = time.perf_counter()
         cpu_start = os.times()
         result_checksum = None
+        retry_count = 0
         for attempt in range(2):
             try:
                 result_checksum = await worker.dispatch_to_workers(
@@ -303,6 +304,7 @@ class JobServer:
             except Exception as exc:
                 error_text = str(exc)
                 if attempt == 0 and _is_restartable_remote_client_error_text(error_text):
+                    retry_count += 1
                     print(
                         f"[jobserver] Retrying transformation {tf_checksum_hex} after restartable remote-client failure",
                         flush=True,
@@ -321,6 +323,7 @@ class JobServer:
                 if attempt == 0 and _is_restartable_remote_client_error_text(
                     result_checksum
                 ):
+                    retry_count += 1
                     print(
                         f"[jobserver] Retrying transformation {tf_checksum_hex} after restartable remote-client failure",
                         flush=True,
@@ -353,7 +356,7 @@ class JobServer:
             "pid": os.getpid(),
             "process_started_at": _process_started_at_iso(),
             "worker_execution_index": _next_execution_record_index(),
-            "retry_count": 0,
+            "retry_count": retry_count,
         }
         response_payload = result_checksum.hex()
         if get_record() and not is_record_probe(transformation_dict, tf_dunder):

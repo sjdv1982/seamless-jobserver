@@ -12,7 +12,10 @@ import time
 from seamless import Checksum, Buffer
 from seamless.transformer import spawn
 from seamless_transformer import worker
-from seamless_transformer.probe_index import ensure_record_bucket_preconditions
+from seamless_transformer.probe_index import (
+    ensure_record_bucket_preconditions,
+    is_record_probe,
+)
 from seamless_transformer.remote_job import parse_remote_job_written
 import seamless
 from seamless.util.get_event_loop import get_event_loop
@@ -297,7 +300,7 @@ class JobServer:
             result_buf = await result_checksum.resolution()
             assert isinstance(result_buf, Buffer)
         response_payload = result_checksum.hex()
-        if get_record():
+        if get_record() and not is_record_probe(transformation_dict, tf_dunder):
             probe_context = await ensure_record_bucket_preconditions(
                 transformation_dict,
                 tf_dunder,

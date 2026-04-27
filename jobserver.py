@@ -65,6 +65,17 @@ def _memory_peak_bytes() -> int | None:
     return peak
 
 
+def _process_create_time_epoch() -> float | None:
+    try:
+        import psutil
+    except Exception:
+        return None
+    try:
+        return float(psutil.Process().create_time())
+    except Exception:
+        return None
+
+
 def _next_execution_record_index() -> int:
     global _EXECUTION_RECORD_COUNTER
     _EXECUTION_RECORD_COUNTER += 1
@@ -367,6 +378,7 @@ class JobServer:
             "hostname": socket.gethostname(),
             "pid": os.getpid(),
             "process_started_at": _process_started_at_iso(),
+            "process_create_time_epoch": _process_create_time_epoch(),
             "worker_execution_index": _next_execution_record_index(),
             "retry_count": retry_count,
         }

@@ -303,6 +303,7 @@ class JobServer:
         if get_record() and not is_record_probe(transformation_dict, tf_dunder):
             from seamless_transformer.transformation_cache import (
                 build_compilation_context_checksum,
+                collect_job_validation,
             )
 
             probe_context = await ensure_record_bucket_preconditions(
@@ -314,11 +315,17 @@ class JobServer:
                 transformation_dict,
                 tf_dunder,
             )
+            job_validation = await collect_job_validation(
+                transformation_dict,
+                tf_dunder,
+                compilation_context=compilation_context,
+            )
             response_payload = json.dumps(
                 {
                     "result_checksum": result_checksum.hex(),
                     "probe_context": probe_context,
                     "compilation_context": compilation_context,
+                    "job_validation": job_validation,
                 }
             )
         print(

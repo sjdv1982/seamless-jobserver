@@ -404,6 +404,7 @@ class JobServer:
                 transformation_dict,
                 tf_dunder,
                 compilation_context=compilation_context,
+                probe_context=probe_context,
             )
             record_runtime.update(
                 await collect_compilation_runtime_metadata(

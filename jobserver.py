@@ -301,15 +301,24 @@ class JobServer:
             assert isinstance(result_buf, Buffer)
         response_payload = result_checksum.hex()
         if get_record() and not is_record_probe(transformation_dict, tf_dunder):
+            from seamless_transformer.transformation_cache import (
+                build_compilation_context_checksum,
+            )
+
             probe_context = await ensure_record_bucket_preconditions(
                 transformation_dict,
                 tf_dunder,
                 execution="remote",
             )
+            compilation_context = await build_compilation_context_checksum(
+                transformation_dict,
+                tf_dunder,
+            )
             response_payload = json.dumps(
                 {
                     "result_checksum": result_checksum.hex(),
                     "probe_context": probe_context,
+                    "compilation_context": compilation_context,
                 }
             )
         print(

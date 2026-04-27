@@ -362,6 +362,7 @@ class JobServer:
         if get_record() and not is_record_probe(transformation_dict, tf_dunder):
             from seamless_transformer.transformation_cache import (
                 build_compilation_context_checksum,
+                collect_compilation_runtime_metadata,
                 collect_job_validation,
             )
 
@@ -378,6 +379,12 @@ class JobServer:
                 transformation_dict,
                 tf_dunder,
                 compilation_context=compilation_context,
+            )
+            record_runtime.update(
+                await collect_compilation_runtime_metadata(
+                    transformation_dict,
+                    tf_dunder,
+                )
             )
             response_payload = json.dumps(
                 {

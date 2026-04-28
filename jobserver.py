@@ -18,6 +18,11 @@ from seamless_transformer.probe_index import (
     ensure_record_bucket_preconditions,
     is_record_probe,
 )
+from seamless_transformer.record_utils import (
+    _memory_peak_bytes,
+    _process_create_time_epoch,
+    _utcnow_iso,
+)
 from seamless_transformer.remote_job import parse_remote_job_written
 import seamless
 from seamless.util.get_event_loop import get_event_loop
@@ -40,40 +45,8 @@ _RESTARTABLE_REMOTE_CLIENT_ERROR_MARKERS = (
 status_tracker = None
 _PROCESS_STARTED_AT = datetime.now(timezone.utc)
 _EXECUTION_RECORD_COUNTER = 0
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
-    )
-
-
 def _process_started_at_iso() -> str:
     return _PROCESS_STARTED_AT.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _memory_peak_bytes() -> int | None:
-    try:
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        peak = int(usage.ru_maxrss)
-    except Exception:
-        return None
-    if peak <= 0:
-        return None
-    if sys.platform.startswith("linux"):
-        return peak * 1024
-    return peak
-
-
-def _process_create_time_epoch() -> float | None:
-    try:
-        import psutil
-    except Exception:
-        return None
-    try:
-        return float(psutil.Process().create_time())
-    except Exception:
-        return None
 
 
 def _next_execution_record_index() -> int:

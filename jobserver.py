@@ -18,6 +18,7 @@ from seamless_transformer.probe_index import (
     ensure_record_bucket_preconditions,
     is_record_probe,
 )
+from seamless_transformer.record_runtime import get_record_mode
 from seamless_transformer.record_utils import (
     _memory_peak_bytes,
     _process_create_time_epoch,
@@ -26,7 +27,6 @@ from seamless_transformer.record_utils import (
 from seamless_transformer.remote_job import parse_remote_job_written
 import seamless
 from seamless.util.get_event_loop import get_event_loop
-from seamless_config.select import get_record
 
 try:
     from seamless_remote.client import close_all_clients as _close_all_clients
@@ -313,7 +313,10 @@ class JobServer:
                             f"[jobserver] Prepared transformation {tf_checksum_hex} in {remote_job_dir}",
                             flush=True,
                         )
-                        return web.Response(status=200, text=result_checksum)
+                        return web.Response(
+                            status=200,
+                            text=json.dumps({"remote_job_written": result_checksum}),
+                        )
                     if attempt == 0 and _is_restartable_remote_client_error_text(
                         result_checksum
                     ):
@@ -346,18 +349,14 @@ class JobServer:
             "cpu_user_seconds": cpu_user_seconds,
             "cpu_system_seconds": cpu_system_seconds,
             "memory_peak_bytes": _memory_peak_bytes(),
-            "gpu_memory_peak_bytes": None,
-            "compilation_time_seconds": None,
-            "hostname": socket.gethostname(),
-            "pid": os.getpid(),
-            "process_started_at": _process_started_at_iso(),
-            "process_create_time_epoch": _process_create_time_epoch(),
-            "worker_execution_index": _next_execution_record_index(),
-            "retry_count": retry_count,
+            "gpu_memory_peak_bytes": gpu_memory_peak_bytes,
         }
-        record_runtime["gpu_memory_peak_bytes"] = gpu_memory_peak_bytes
-        response_payload = result_checksum.hex()
-        if get_record() and not is_record_probe(transformation_dict, tf_dunder):
+        record_mode = get_record_mode()
+        response_payload = {
+            "result_checksum": result_checksum.hex(),
+            "record_runtime": record_runtime,
+        }
+        if record_mode and not is_record_probe(transformation_dict, tf_dunder):
             from seamless_transformer.transformation_cache import (
                 build_compilation_context_checksum,
                 collect_compilation_runtime_metadata,
@@ -380,25 +379,33 @@ class JobServer:
                 probe_context=probe_context,
             )
             record_runtime.update(
+                {
+                    "hostname": socket.gethostname(),
+                    "pid": os.getpid(),
+                    "process_started_at": _process_started_at_iso(),
+                    "process_create_time_epoch": _process_create_time_epoch(),
+                    "worker_execution_index": _next_execution_record_index(),
+                    "retry_count": retry_count,
+                }
+            )
+            record_runtime.update(
                 await collect_compilation_runtime_metadata(
                     transformation_dict,
                     tf_dunder,
                 )
             )
-            response_payload = json.dumps(
+            response_payload.update(
                 {
-                    "result_checksum": result_checksum.hex(),
                     "probe_context": probe_context,
                     "compilation_context": compilation_context,
                     "job_validation": job_validation,
-                    "record_runtime": record_runtime,
                 }
             )
         print(
             f"[jobserver] Completed transformation {tf_checksum_hex} -> {result_checksum.hex()}",
             flush=True,
         )
-        return web.Response(status=200, text=response_payload)
+        return web.Response(status=200, text=json.dumps(response_payload))
 
 
 def main():

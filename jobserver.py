@@ -11,29 +11,6 @@ import socket
 import sys
 import time
 
-from seamless import Checksum, Buffer
-from seamless.transformer import spawn
-from seamless_transformer import worker
-from seamless_transformer.probe_index import (
-    ensure_record_bucket_preconditions,
-    is_record_probe,
-)
-from seamless_transformer.record_runtime import get_record_mode
-from seamless_transformer.record_utils import (
-    _memory_peak_bytes,
-    _process_create_time_epoch,
-    _utcnow_iso,
-)
-from seamless_transformer.remote_job import parse_remote_job_written
-import seamless
-from seamless.util.get_event_loop import get_event_loop
-
-try:
-    from seamless_remote.client import close_all_clients as _close_all_clients
-except ImportError:
-    _close_all_clients = None
-
-
 STATUS_FILE_WAIT_TIMEOUT = 20.0
 INACTIVITY_CHECK_INTERVAL = 1.0
 _RESTARTABLE_REMOTE_CLIENT_ERROR_MARKERS = (
@@ -45,6 +22,74 @@ _RESTARTABLE_REMOTE_CLIENT_ERROR_MARKERS = (
 status_tracker = None
 _PROCESS_STARTED_AT = datetime.now(timezone.utc)
 _EXECUTION_RECORD_COUNTER = 0
+_STARTUP_RECORD_MODE = False
+
+
+class _LazyModuleProxy:
+    def __init__(self, module_name: str):
+        self._module_name = module_name
+
+    def _load(self):
+        import importlib
+
+        return importlib.import_module(self._module_name)
+
+    def __getattr__(self, name: str):
+        return getattr(self._load(), name)
+
+
+seamless = _LazyModuleProxy("seamless")
+worker = _LazyModuleProxy("seamless_transformer.worker")
+
+
+def get_event_loop():
+    from seamless.util.get_event_loop import get_event_loop as _get_event_loop
+
+    return _get_event_loop()
+
+
+def ensure_record_bucket_preconditions(*args, **kwargs):
+    from seamless_transformer.probe_index import ensure_record_bucket_preconditions
+
+    return ensure_record_bucket_preconditions(*args, **kwargs)
+
+
+def is_record_probe(*args, **kwargs):
+    from seamless_transformer.probe_index import is_record_probe
+
+    return is_record_probe(*args, **kwargs)
+
+
+def get_record_mode():
+    from seamless_transformer.record_runtime import get_record_mode
+
+    return get_record_mode()
+
+
+def _memory_peak_bytes():
+    from seamless_transformer.record_utils import _memory_peak_bytes
+
+    return _memory_peak_bytes()
+
+
+def _process_create_time_epoch():
+    from seamless_transformer.record_utils import _process_create_time_epoch
+
+    return _process_create_time_epoch()
+
+
+def _utcnow_iso():
+    from seamless_transformer.record_utils import _utcnow_iso
+
+    return _utcnow_iso()
+
+
+def parse_remote_job_written(*args, **kwargs):
+    from seamless_transformer.remote_job import parse_remote_job_written
+
+    return parse_remote_job_written(*args, **kwargs)
+
+
 def _process_started_at_iso() -> str:
     return _PROCESS_STARTED_AT.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -256,6 +301,8 @@ class JobServer:
         return web.Response(status=200, body="Seamless jobserver is running")
 
     async def _run_transformation(self, request):
+        from seamless import Buffer, Checksum
+
         self._register_activity()
         try:
             payload = await request.json()
@@ -267,8 +314,20 @@ class JobServer:
             tf_checksum = Checksum(payload["tf_checksum"])
             tf_dunder = payload.get("tf_dunder", {})
             scratch = bool(payload.get("scratch", False))
+            request_record_mode = bool(payload.get("record", False))
         except Exception as exc:
             return web.Response(status=400, text=f"Invalid payload: {exc}")
+
+        if request_record_mode != _STARTUP_RECORD_MODE:
+            return web.Response(
+                status=409,
+                text=(
+                    "Jobserver record mode mismatch: "
+                    f"client requested record={request_record_mode}, "
+                    f"but jobserver started with record={_STARTUP_RECORD_MODE}. "
+                    "Restart the jobserver after changing record mode."
+                ),
+            )
 
         tf_checksum_hex = tf_checksum.hex()
         print(f"[jobserver] Received transformation {tf_checksum_hex}", flush=True)
@@ -285,6 +344,17 @@ class JobServer:
         result_checksum = None
         retry_count = 0
         try:
+            record_mode = get_record_mode()
+            record_probe = is_record_probe(transformation_dict, tf_dunder)
+            if record_mode and not record_probe:
+                try:
+                    await ensure_record_bucket_preconditions(
+                        transformation_dict,
+                        tf_dunder,
+                        execution="remote",
+                    )
+                except Exception as exc:
+                    return web.Response(status=500, text=str(exc))
             for attempt in range(2):
                 try:
                     result_checksum = await worker.dispatch_to_workers(
@@ -351,12 +421,11 @@ class JobServer:
             "memory_peak_bytes": _memory_peak_bytes(),
             "gpu_memory_peak_bytes": gpu_memory_peak_bytes,
         }
-        record_mode = get_record_mode()
         response_payload = {
             "result_checksum": result_checksum.hex(),
             "record_runtime": record_runtime,
         }
-        if record_mode and not is_record_probe(transformation_dict, tf_dunder):
+        if record_mode and not record_probe:
             from seamless_transformer.transformation_cache import (
                 build_compilation_context_checksum,
                 collect_compilation_runtime_metadata,
@@ -440,7 +509,7 @@ def main():
     )
     args = p.parse_args()
 
-    global status_tracker
+    global status_tracker, _STARTUP_RECORD_MODE
 
     selected_port = args.port if args.port is not None else 5533
     status_file_path = args.status_file
@@ -475,12 +544,23 @@ def main():
     signal.signal(signal.SIGHUP, raise_system_exit)
     signal.signal(signal.SIGINT, raise_system_exit)
 
+    record_requested = bool(parameters.get("record"))
+    _STARTUP_RECORD_MODE = record_requested
     try:
+        from seamless.transformer import spawn
+
         spawn(args.workers)
         if parameters:
             from seamless.config import set_remote_clients
 
             set_remote_clients(parameters)
+        if record_requested:
+            # Worker/client setup may import or initialize configuration modules.
+            # Re-assert record mode last so the request handler sees the launch
+            # contract passed in the remote-http-launcher status file.
+            from seamless_config.select import select_record
+
+            select_record(True)
     except BaseException as exc:
         raise_startup_error(exc)
 
@@ -514,11 +594,12 @@ def main():
                 worker.shutdown_workers()
             except Exception:
                 pass
-            if _close_all_clients is not None:
-                try:
-                    _close_all_clients()
-                except Exception:
-                    pass
+            try:
+                from seamless_remote.client import close_all_clients
+
+                close_all_clients()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

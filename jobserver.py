@@ -553,7 +553,7 @@ def main():
         if parameters:
             from seamless.config import set_remote_clients
 
-            set_remote_clients(parameters)
+            set_remote_clients(parameters, in_remote=True)
         if record_requested:
             # Worker/client setup may import or initialize configuration modules.
             # Re-assert record mode last so the request handler sees the launch

@@ -314,6 +314,7 @@ class JobServer:
             tf_checksum = Checksum(payload["tf_checksum"])
             tf_dunder = payload.get("tf_dunder", {})
             scratch = bool(payload.get("scratch", False))
+            strict_dunder = bool(payload.get("strict_dunder", False))
             request_record_mode = bool(payload.get("record", False))
         except Exception as exc:
             return web.Response(status=400, text=f"Invalid payload: {exc}")
@@ -362,6 +363,7 @@ class JobServer:
                         tf_checksum=tf_checksum,
                         tf_dunder=tf_dunder,
                         scratch=scratch,
+                        strict_dunder=strict_dunder,
                     )
                 except Exception as exc:
                     error_text = str(exc)

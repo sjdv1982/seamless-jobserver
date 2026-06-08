@@ -10,7 +10,8 @@ from seamless_transformer.record_runtime import get_record_mode
 
 
 class _FakeRequest:
-    def __init__(self, payload):
+    def __init__(self, payload=None, *, match_info=None):
+        self.match_info = match_info or {}
         self._payload = payload
 
     async def json(self):
@@ -83,6 +84,106 @@ def test_record_mode_mismatch_blocks_before_worker_dispatch(monkeypatch):
     assert response.status == 409
     assert "Jobserver record mode mismatch" in response.text
     assert calls == []
+
+
+def test_transformation_status_endpoint_reports_dask_status(monkeypatch):
+    server = jobserver.JobServer("127.0.0.1", 0)
+    monkeypatch.setattr(server, "_dask_transformation_status", lambda _checksum: "running")
+
+    response = asyncio.run(
+        server._transformation_status(
+            _FakeRequest(match_info={"tf_checksum": "1" * 64})
+        )
+    )
+
+    assert response.status == 200
+    assert json.loads(response.text) == {"status": "running"}
+
+
+def test_transformation_status_endpoint_reports_local_status():
+    server = jobserver.JobServer("127.0.0.1", 0)
+
+    class _Task:
+        def cancelled(self):
+            return False
+
+        def done(self):
+            return False
+
+    server._active_transformations["3" * 64] = {
+        "task": _Task(),
+        "status": "running",
+    }
+
+    response = asyncio.run(
+        server._transformation_status(
+            _FakeRequest(match_info={"tf_checksum": "3" * 64})
+        )
+    )
+
+    assert response.status == 200
+    assert json.loads(response.text) == {"status": "running"}
+
+
+def test_cancel_transformation_endpoint_cancels_local_task():
+    server = jobserver.JobServer("127.0.0.1", 0)
+    calls = []
+
+    class _Task:
+        def cancelled(self):
+            return False
+
+        def done(self):
+            return False
+
+        def cancel(self):
+            calls.append("cancel")
+
+    server._active_transformations["4" * 64] = {
+        "task": _Task(),
+        "status": "running",
+    }
+
+    response = asyncio.run(
+        server._cancel_transformation(
+            _FakeRequest(match_info={"tf_checksum": "4" * 64})
+        )
+    )
+
+    assert response.status == 200
+    assert json.loads(response.text) == {"canceled": True, "status": "canceled"}
+    assert calls == ["cancel"]
+    assert server._active_transformations["4" * 64]["status"] == "canceled"
+
+
+def test_cancel_transformation_endpoint_uses_dask_client(monkeypatch):
+    server = jobserver.JobServer("127.0.0.1", 0)
+    calls = []
+
+    class _FakeDaskClient:
+        def cancel_by_checksum(self, checksum):
+            calls.append(checksum.hex())
+            return True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "seamless_dask.transformer_client",
+        type(
+            "_FakeTransformerClient",
+            (),
+            {"get_seamless_dask_client": staticmethod(lambda: _FakeDaskClient())},
+        )(),
+    )
+
+    response = asyncio.run(
+        server._cancel_transformation(
+            _FakeRequest(match_info={"tf_checksum": "2" * 64})
+        )
+    )
+
+    assert response.status == 200
+    assert json.loads(response.text) == {"canceled": True, "status": "canceled"}
+    assert calls == ["2" * 64]
 
 
 def test_main_reasserts_record_after_startup_setup(monkeypatch, tmp_path):

@@ -223,6 +223,7 @@ class JobServer:
         self._last_request = None
         self._runner = None
         self._site = None
+        self._active_transformations = {}
 
     async def _start(self):
         if is_port_in_use(self.host, self.port):
@@ -235,6 +236,14 @@ class JobServer:
                 web.get("/", self._welcome),
                 web.get("/healthcheck", self._healthcheck),
                 web.get("/run-transformation", self._run_transformation),
+                web.get(
+                    "/transformation-status/{tf_checksum}",
+                    self._transformation_status,
+                ),
+                web.post(
+                    "/cancel-transformation/{tf_checksum}",
+                    self._cancel_transformation,
+                ),
             ]
         )
         runner = web.AppRunner(app)
@@ -300,6 +309,120 @@ class JobServer:
         self._register_activity()
         return web.Response(status=200, body="Seamless jobserver is running")
 
+    def _dask_transformation_status(self, tf_checksum):
+        try:
+            from seamless import Checksum
+            from seamless_dask.transformer_client import get_seamless_dask_client
+        except Exception:
+            return "not-running"
+        dask_client = get_seamless_dask_client()
+        if dask_client is None:
+            return "not-running"
+        get_futures = getattr(dask_client, "get_transformation_futures", None)
+        if not callable(get_futures):
+            return "not-running"
+        try:
+            futures = get_futures(Checksum(tf_checksum))
+        except Exception:
+            return "not-running"
+        if futures is None:
+            return "not-running"
+        try:
+            if futures.base.cancelled() or futures.thin.cancelled():
+                return "canceled"
+            if not futures.base.done() or not futures.thin.done():
+                return "running"
+            _tf_checksum, result_checksum, exc = futures.thin.result()
+            if exc:
+                return "failed"
+            if result_checksum:
+                return "done"
+        except Exception:
+            return "failed"
+        return "not-running"
+
+    def _local_transformation_status(self, tf_checksum):
+        tf_checksum_hex = tf_checksum.hex()
+        entry = self._active_transformations.get(tf_checksum_hex)
+        if entry is None:
+            return "not-running"
+        status = entry.get("status")
+        if status == "canceled":
+            return "canceled"
+        task = entry.get("task")
+        if task is None:
+            return status or "not-running"
+        if task.cancelled():
+            entry["status"] = "canceled"
+            return "canceled"
+        if not task.done():
+            return "running"
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            entry["status"] = "canceled"
+            return "canceled"
+        except Exception:
+            self._active_transformations.pop(tf_checksum_hex, None)
+            return "failed"
+        self._active_transformations.pop(tf_checksum_hex, None)
+        return "not-running"
+
+    def _transformation_status_for_checksum(self, tf_checksum):
+        local_status = self._local_transformation_status(tf_checksum)
+        if local_status != "not-running":
+            return local_status
+        return self._dask_transformation_status(tf_checksum)
+
+    async def _transformation_status(self, request):
+        from seamless import Checksum
+
+        self._register_activity()
+        try:
+            tf_checksum = Checksum(request.match_info["tf_checksum"])
+        except Exception as exc:
+            return web.Response(status=400, text=f"Invalid checksum: {exc}")
+        return web.json_response(
+            {"status": self._transformation_status_for_checksum(tf_checksum)}
+        )
+
+    async def _cancel_transformation(self, request):
+        from seamless import Checksum
+
+        self._register_activity()
+        try:
+            tf_checksum = Checksum(request.match_info["tf_checksum"])
+        except Exception as exc:
+            return web.Response(status=400, text=f"Invalid checksum: {exc}")
+        canceled = False
+        tf_checksum_hex = tf_checksum.hex()
+        entry = self._active_transformations.get(tf_checksum_hex)
+        if entry is not None and entry.get("status") != "canceled":
+            entry["status"] = "canceled"
+            task = entry.get("task")
+            if task is not None and not task.done():
+                task.cancel()
+            canceled = True
+        try:
+            from seamless_dask.transformer_client import get_seamless_dask_client
+        except Exception:
+            dask_client = None
+        else:
+            dask_client = get_seamless_dask_client()
+        if dask_client is not None:
+            cancel = getattr(dask_client, "cancel_by_checksum", None)
+            if callable(cancel):
+                try:
+                    canceled = bool(cancel(tf_checksum)) or canceled
+                except Exception:
+                    pass
+        status = (
+            "canceled"
+            if canceled
+            else self._transformation_status_for_checksum(tf_checksum)
+        )
+        return web.json_response({"canceled": canceled, "status": status})
+
     async def _run_transformation(self, request):
         from seamless import Buffer, Checksum
 
@@ -332,6 +455,10 @@ class JobServer:
 
         tf_checksum_hex = tf_checksum.hex()
         print(f"[jobserver] Received transformation {tf_checksum_hex}", flush=True)
+        self._active_transformations[tf_checksum_hex] = {
+            "task": asyncio.current_task(),
+            "status": "running",
+        }
         started_at = _utcnow_iso()
         wall_start = time.perf_counter()
         cpu_start = os.times()

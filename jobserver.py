@@ -399,9 +399,6 @@ class JobServer:
         entry = self._active_transformations.get(tf_checksum_hex)
         if entry is not None and entry.get("status") != "canceled":
             entry["status"] = "canceled"
-            task = entry.get("task")
-            if task is not None and not task.done():
-                task.cancel()
             canceled = True
         try:
             from seamless_dask.transformer_client import get_seamless_dask_client
@@ -529,6 +526,14 @@ class JobServer:
                 break
         finally:
             gpu_memory_peak_bytes = stop_gpu_memory_sampler(gpu_sampler)
+
+        entry = self._active_transformations.get(tf_checksum_hex)
+        if entry is not None and entry.get("status") == "canceled":
+            print(
+                f"[jobserver] Rejected canceled transformation {tf_checksum_hex}",
+                flush=True,
+            )
+            return web.Response(status=200, text="Transformation was canceled")
 
         assert result_checksum is not None
 

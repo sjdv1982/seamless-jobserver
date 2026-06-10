@@ -125,9 +125,8 @@ def test_transformation_status_endpoint_reports_local_status():
     assert json.loads(response.text) == {"status": "running"}
 
 
-def test_cancel_transformation_endpoint_cancels_local_task():
+def test_cancel_transformation_endpoint_marks_local_task_canceled():
     server = jobserver.JobServer("127.0.0.1", 0)
-    calls = []
 
     class _Task:
         def cancelled(self):
@@ -135,9 +134,6 @@ def test_cancel_transformation_endpoint_cancels_local_task():
 
         def done(self):
             return False
-
-        def cancel(self):
-            calls.append("cancel")
 
     server._active_transformations["4" * 64] = {
         "task": _Task(),
@@ -152,7 +148,6 @@ def test_cancel_transformation_endpoint_cancels_local_task():
 
     assert response.status == 200
     assert json.loads(response.text) == {"canceled": True, "status": "canceled"}
-    assert calls == ["cancel"]
     assert server._active_transformations["4" * 64]["status"] == "canceled"
 
 

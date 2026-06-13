@@ -3,6 +3,7 @@ import json
 import sys
 
 import jobserver
+from seamless import Buffer
 import seamless.transformer as seamless_transformer
 from seamless_config import select
 from seamless_transformer.probe_index import RecordBucketError
@@ -56,6 +57,33 @@ def test_record_mode_missing_probe_blocks_before_worker_dispatch(monkeypatch):
     assert response.status == 500
     assert "missing bucket probe" in response.text
     assert [call[0] for call in calls] == ["probe"]
+
+
+def test_run_expression_evaluates_inline_without_worker_dispatch(monkeypatch):
+    server = jobserver.JobServer("127.0.0.1", 0)
+    source_checksum = Buffer({"a": "hello"}, "plain").get_checksum()
+
+    async def _unexpected_dispatch(*args, **kwargs):
+        raise AssertionError("expression evaluation must not use transformation workers")
+
+    monkeypatch.setattr(jobserver.worker, "dispatch_to_workers", _unexpected_dispatch)
+
+    response = asyncio.run(
+        server._run_expression(
+            _FakeRequest(
+                {
+                    "input_checksum": source_checksum.hex(),
+                    "path": "a",
+                    "celltype": "plain",
+                    "target_celltype": "str",
+                }
+            )
+        )
+    )
+
+    assert response.status == 200
+    payload = json.loads(response.text)
+    assert Buffer("hello", "str").get_checksum().hex() == payload["result_checksum"]
 
 
 def test_record_mode_mismatch_blocks_before_worker_dispatch(monkeypatch):

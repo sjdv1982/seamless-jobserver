@@ -236,6 +236,7 @@ class JobServer:
                 web.get("/", self._welcome),
                 web.get("/healthcheck", self._healthcheck),
                 web.get("/run-transformation", self._run_transformation),
+                web.get("/run-expression", self._run_expression),
                 web.get(
                     "/transformation-status/{tf_checksum}",
                     self._transformation_status,
@@ -609,6 +610,45 @@ class JobServer:
             flush=True,
         )
         return web.Response(status=200, text=json.dumps(response_payload))
+
+    async def _run_expression(self, request):
+        from seamless import Buffer, Checksum
+        from seamless.checksum.expression import evaluate_expression_async
+
+        self._register_activity()
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+        try:
+            input_checksum = Checksum(payload["input_checksum"])
+            path = payload["path"]
+            celltype = payload["celltype"]
+            target_celltype = payload["target_celltype"]
+        except Exception as exc:
+            return web.Response(status=400, text=f"Invalid payload: {exc}")
+
+        try:
+            try:
+                input_buffer = await input_checksum.resolution()
+            except Exception:
+                input_buffer = None
+            if isinstance(input_buffer, Buffer):
+                Buffer(input_buffer.content, checksum=input_checksum)
+            result_checksum = await evaluate_expression_async(
+                input_checksum,
+                path,
+                celltype,
+                target_celltype,
+            )
+        except Exception as exc:
+            return web.Response(status=500, text=str(exc))
+
+        return web.Response(
+            status=200,
+            text=json.dumps({"result_checksum": result_checksum.hex()}),
+        )
 
 
 def main():

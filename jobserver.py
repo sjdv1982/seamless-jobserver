@@ -245,6 +245,10 @@ class JobServer:
                     "/cancel-transformation/{tf_checksum}",
                     self._cancel_transformation,
                 ),
+                web.post(
+                    "/softcancel-transformation/{tf_checksum}",
+                    self._softcancel_transformation,
+                ),
             ]
         )
         runner = web.AppRunner(app)
@@ -350,6 +354,8 @@ class JobServer:
         status = entry.get("status")
         if status == "canceled":
             return "canceled"
+        if status in ("done", "failed"):
+            return status
         task = entry.get("task")
         if task is None:
             return status or "not-running"
@@ -364,10 +370,10 @@ class JobServer:
             entry["status"] = "canceled"
             return "canceled"
         except Exception:
-            self._active_transformations.pop(tf_checksum_hex, None)
+            entry["status"] = "failed"
             return "failed"
-        self._active_transformations.pop(tf_checksum_hex, None)
-        return "not-running"
+        entry["status"] = "done"
+        return "done"
 
     def _transformation_status_for_checksum(self, tf_checksum):
         local_status = self._local_transformation_status(tf_checksum)
@@ -400,6 +406,16 @@ class JobServer:
         entry = self._active_transformations.get(tf_checksum_hex)
         if entry is not None and entry.get("status") != "canceled":
             entry["status"] = "canceled"
+            members = entry.get("members")
+            if isinstance(members, set):
+                members.clear()
+            task = entry.get("task")
+            if task is not None and not task.done() and hasattr(task, "cancel"):
+                task.cancel()
+            try:
+                worker.cancel_by_checksum(tf_checksum)
+            except Exception:
+                pass
             canceled = True
         try:
             from seamless_dask.transformer_client import get_seamless_dask_client
@@ -421,8 +437,54 @@ class JobServer:
         )
         return web.json_response({"canceled": canceled, "status": status})
 
+    async def _softcancel_transformation(self, request):
+        from seamless import Checksum
+
+        self._register_activity()
+        try:
+            tf_checksum = Checksum(request.match_info["tf_checksum"])
+        except Exception as exc:
+            return web.Response(status=400, text=f"Invalid checksum: {exc}")
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            return web.Response(status=400, text=f"Invalid JSON: {exc}")
+        member_id = payload.get("member_id")
+        if not isinstance(member_id, str) or not member_id:
+            return web.Response(status=400, text="Missing member_id")
+        canceled = self._detach_transformation_member(tf_checksum, member_id)
+        status = (
+            "canceled"
+            if canceled
+            else self._transformation_status_for_checksum(tf_checksum)
+        )
+        return web.json_response({"canceled": canceled, "status": status})
+
+    def _detach_transformation_member(self, tf_checksum, member_id: str) -> bool:
+        tf_checksum_hex = tf_checksum.hex()
+        entry = self._active_transformations.get(tf_checksum_hex)
+        if entry is None:
+            return False
+        members = entry.get("members")
+        if not isinstance(members, set) or member_id not in members:
+            return False
+        members.remove(member_id)
+        if members:
+            return False
+        task = entry.get("task")
+        if task is None or task.done():
+            return False
+        entry["status"] = "canceled"
+        if task is not None:
+            task.cancel()
+        try:
+            worker.cancel_by_checksum(tf_checksum)
+        except Exception:
+            pass
+        return True
+
     async def _run_transformation(self, request):
-        from seamless import Buffer, Checksum
+        from seamless import Checksum
 
         self._register_activity()
         try:
@@ -437,6 +499,9 @@ class JobServer:
             scratch = bool(payload.get("scratch", False))
             strict_dunder = bool(payload.get("strict_dunder", False))
             request_record_mode = bool(payload.get("record", False))
+            member_id = payload.get("member_id")
+            if not isinstance(member_id, str) or not member_id:
+                member_id = f"legacy-request-{id(request)}"
         except Exception as exc:
             return web.Response(status=400, text=f"Invalid payload: {exc}")
 
@@ -452,11 +517,57 @@ class JobServer:
             )
 
         tf_checksum_hex = tf_checksum.hex()
-        print(f"[jobserver] Received transformation {tf_checksum_hex}", flush=True)
-        self._active_transformations[tf_checksum_hex] = {
-            "task": asyncio.current_task(),
-            "status": "running",
-        }
+        entry = self._active_transformations.get(tf_checksum_hex)
+        if entry is None or entry.get("status") in ("canceled", "failed", "done"):
+            print(f"[jobserver] Received transformation {tf_checksum_hex}", flush=True)
+            task = asyncio.create_task(
+                self._run_transformation_task(
+                    transformation_dict,
+                    tf_checksum=tf_checksum,
+                    tf_dunder=tf_dunder,
+                    scratch=scratch,
+                    strict_dunder=strict_dunder,
+                )
+            )
+            entry = {
+                "task": task,
+                "members": set(),
+                "status": "running",
+                "result": None,
+                "exception": None,
+            }
+            self._active_transformations[tf_checksum_hex] = entry
+        else:
+            print(f"[jobserver] Attached to transformation {tf_checksum_hex}", flush=True)
+        entry["members"].add(member_id)
+        try:
+            status, text = await entry["task"]
+        except asyncio.CancelledError:
+            entry["status"] = "canceled"
+            return web.Response(status=200, text="Transformation was canceled")
+        except Exception as exc:
+            entry["status"] = "failed"
+            entry["exception"] = exc
+            return web.Response(status=500, text=str(exc))
+        finally:
+            self._detach_transformation_member(tf_checksum, member_id)
+        if status >= 400:
+            entry["status"] = "failed"
+            entry["exception"] = text
+        return web.Response(status=status, text=text)
+
+    async def _run_transformation_task(
+        self,
+        transformation_dict,
+        *,
+        tf_checksum,
+        tf_dunder,
+        scratch: bool,
+        strict_dunder: bool,
+    ):
+        from seamless import Buffer, Checksum
+
+        tf_checksum_hex = tf_checksum.hex()
         started_at = _utcnow_iso()
         wall_start = time.perf_counter()
         cpu_start = os.times()
@@ -480,7 +591,7 @@ class JobServer:
                         execution="remote",
                     )
                 except Exception as exc:
-                    return web.Response(status=500, text=str(exc))
+                    return 500, str(exc)
             for attempt in range(2):
                 try:
                     result_checksum = await worker.dispatch_to_workers(
@@ -501,7 +612,7 @@ class JobServer:
                             flush=True,
                         )
                         continue
-                    return web.Response(status=500, text=error_text)
+                    return 500, error_text
 
                 if isinstance(result_checksum, str):
                     remote_job_dir = parse_remote_job_written(result_checksum)
@@ -510,10 +621,7 @@ class JobServer:
                             f"[jobserver] Prepared transformation {tf_checksum_hex} in {remote_job_dir}",
                             flush=True,
                         )
-                        return web.Response(
-                            status=200,
-                            text=json.dumps({"remote_job_written": result_checksum}),
-                        )
+                        return 200, json.dumps({"remote_job_written": result_checksum})
                     if attempt == 0 and _is_restartable_remote_client_error_text(
                         result_checksum
                     ):
@@ -523,7 +631,7 @@ class JobServer:
                             flush=True,
                         )
                         continue
-                    return web.Response(status=500, text=result_checksum)
+                    return 500, result_checksum
                 break
         finally:
             gpu_memory_peak_bytes = stop_gpu_memory_sampler(gpu_sampler)
@@ -534,7 +642,7 @@ class JobServer:
                 f"[jobserver] Rejected canceled transformation {tf_checksum_hex}",
                 flush=True,
             )
-            return web.Response(status=200, text="Transformation was canceled")
+            return 200, "Transformation was canceled"
 
         assert result_checksum is not None
 
@@ -609,7 +717,11 @@ class JobServer:
             f"[jobserver] Completed transformation {tf_checksum_hex} -> {result_checksum.hex()}",
             flush=True,
         )
-        return web.Response(status=200, text=json.dumps(response_payload))
+        entry = self._active_transformations.get(tf_checksum_hex)
+        if entry is not None:
+            entry["status"] = "done"
+            entry["result"] = response_payload
+        return 200, json.dumps(response_payload)
 
     async def _run_expression(self, request):
         from seamless import Buffer, Checksum

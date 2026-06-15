@@ -4,6 +4,7 @@ import sys
 
 import jobserver
 from seamless import Buffer
+from seamless import Checksum
 import seamless.transformer as seamless_transformer
 from seamless_config import select
 from seamless_transformer.probe_index import RecordBucketError
@@ -207,6 +208,155 @@ def test_cancel_transformation_endpoint_uses_dask_client(monkeypatch):
     assert response.status == 200
     assert json.loads(response.text) == {"canceled": True, "status": "canceled"}
     assert calls == ["2" * 64]
+
+
+def test_duplicate_transformations_share_one_dispatch(monkeypatch):
+    server = jobserver.JobServer("127.0.0.1", 0)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def _dispatch(*args, **kwargs):
+        calls.append(kwargs["tf_checksum"].hex())
+        started.set()
+        await release.wait()
+        return Checksum("5" * 64)
+
+    monkeypatch.setattr(jobserver, "_STARTUP_RECORD_MODE", False)
+    monkeypatch.setattr(jobserver, "get_record_mode", lambda: False)
+    monkeypatch.setattr(jobserver.worker, "dispatch_to_workers", _dispatch)
+
+    payload = {
+        "transformation_dict": {"__language__": "python"},
+        "tf_checksum": "5" * 64,
+        "tf_dunder": {},
+        "scratch": True,
+        "record": False,
+    }
+
+    async def main():
+        task1 = asyncio.create_task(
+            server._run_transformation(
+                _FakeRequest({**payload, "member_id": "member-1"})
+            )
+        )
+        await started.wait()
+        task2 = asyncio.create_task(
+            server._run_transformation(
+                _FakeRequest({**payload, "member_id": "member-2"})
+            )
+        )
+        await asyncio.sleep(0)
+        assert server._active_transformations["5" * 64]["members"] == {
+            "member-1",
+            "member-2",
+        }
+        release.set()
+        response1, response2 = await asyncio.gather(task1, task2)
+        return response1, response2
+
+    response1, response2 = asyncio.run(main())
+
+    assert calls == ["5" * 64]
+    assert response1.status == 200
+    assert response2.status == 200
+    assert json.loads(response1.text)["result_checksum"] == "5" * 64
+    assert json.loads(response2.text)["result_checksum"] == "5" * 64
+    assert server._active_transformations["5" * 64]["status"] == "done"
+
+
+def test_softcancel_one_member_leaves_sibling_running(monkeypatch):
+    server = jobserver.JobServer("127.0.0.1", 0)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    canceled = []
+
+    async def _dispatch(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return Checksum("6" * 64)
+
+    monkeypatch.setattr(jobserver, "_STARTUP_RECORD_MODE", False)
+    monkeypatch.setattr(jobserver, "get_record_mode", lambda: False)
+    monkeypatch.setattr(jobserver.worker, "dispatch_to_workers", _dispatch)
+    monkeypatch.setattr(jobserver.worker, "cancel_by_checksum", lambda checksum: canceled.append(checksum.hex()) or True)
+
+    payload = {
+        "transformation_dict": {"__language__": "python"},
+        "tf_checksum": "6" * 64,
+        "tf_dunder": {},
+        "scratch": True,
+        "record": False,
+    }
+
+    async def main():
+        task1 = asyncio.create_task(
+            server._run_transformation(
+                _FakeRequest({**payload, "member_id": "member-1"})
+            )
+        )
+        await started.wait()
+        task2 = asyncio.create_task(
+            server._run_transformation(
+                _FakeRequest({**payload, "member_id": "member-2"})
+            )
+        )
+        await asyncio.sleep(0)
+        response = await server._softcancel_transformation(
+            _FakeRequest(
+                {"member_id": "member-1"},
+                match_info={"tf_checksum": "6" * 64},
+            )
+        )
+        assert json.loads(response.text) == {"canceled": False, "status": "running"}
+        assert server._active_transformations["6" * 64]["members"] == {"member-2"}
+        release.set()
+        await asyncio.gather(task1, task2)
+
+    asyncio.run(main())
+    assert canceled == []
+
+
+def test_softcancel_last_member_cancels_dispatch(monkeypatch):
+    server = jobserver.JobServer("127.0.0.1", 0)
+    started = asyncio.Event()
+    canceled = []
+
+    async def _dispatch(*args, **kwargs):
+        started.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(jobserver, "_STARTUP_RECORD_MODE", False)
+    monkeypatch.setattr(jobserver, "get_record_mode", lambda: False)
+    monkeypatch.setattr(jobserver.worker, "dispatch_to_workers", _dispatch)
+    monkeypatch.setattr(jobserver.worker, "cancel_by_checksum", lambda checksum: canceled.append(checksum.hex()) or True)
+
+    payload = {
+        "transformation_dict": {"__language__": "python"},
+        "tf_checksum": "7" * 64,
+        "tf_dunder": {},
+        "scratch": True,
+        "record": False,
+        "member_id": "member-1",
+    }
+
+    async def main():
+        task = asyncio.create_task(server._run_transformation(_FakeRequest(payload)))
+        await started.wait()
+        response = await server._softcancel_transformation(
+            _FakeRequest(
+                {"member_id": "member-1"},
+                match_info={"tf_checksum": "7" * 64},
+            )
+        )
+        assert json.loads(response.text) == {"canceled": True, "status": "canceled"}
+        result = await task
+        return result
+
+    result = asyncio.run(main())
+    assert result.status == 200
+    assert result.text == "Transformation was canceled"
+    assert canceled == ["7" * 64]
 
 
 def test_main_reasserts_record_after_startup_setup(monkeypatch, tmp_path):

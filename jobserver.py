@@ -554,6 +554,9 @@ class JobServer:
         if status >= 400:
             entry["status"] = "failed"
             entry["exception"] = text
+        else:
+            entry["status"] = "done"
+            entry["result"] = text
         return web.Response(status=status, text=text)
 
     async def _run_transformation_task(

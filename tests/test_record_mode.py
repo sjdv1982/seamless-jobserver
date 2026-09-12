@@ -75,8 +75,8 @@ def test_run_expression_evaluates_inline_without_worker_dispatch(monkeypatch):
                 {
                     "input_checksum": source_checksum.hex(),
                     "path": "a",
-                    "celltype": "plain",
-                    "target_celltype": "str",
+                    'input_celltype': "plain",
+                    'celltype': "str",
                 }
             )
         )

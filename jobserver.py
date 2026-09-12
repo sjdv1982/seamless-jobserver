@@ -739,8 +739,8 @@ class JobServer:
         try:
             input_checksum = Checksum(payload["input_checksum"])
             path = payload["path"]
+            input_celltype = payload["input_celltype"]
             celltype = payload["celltype"]
-            target_celltype = payload["target_celltype"]
         except Exception as exc:
             return web.Response(status=400, text=f"Invalid payload: {exc}")
 
@@ -754,8 +754,8 @@ class JobServer:
             result_checksum = await evaluate_expression_async(
                 input_checksum,
                 path,
+                input_celltype,
                 celltype,
-                target_celltype,
             )
         except Exception as exc:
             return web.Response(status=500, text=str(exc))

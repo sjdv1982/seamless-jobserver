@@ -836,6 +836,10 @@ def main():
     record_requested = bool(parameters.get("record"))
     _STARTUP_RECORD_MODE = record_requested
     try:
+        # Initialize the utility package before transformer imports start cache
+        # threads that also import its children. Otherwise Python can detect a
+        # cross-thread package/submodule import-lock deadlock during startup.
+        import seamless.util as _startup_util
         from seamless.transformer import spawn
 
         spawn(args.workers)

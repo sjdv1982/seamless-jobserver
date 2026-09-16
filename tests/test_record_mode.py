@@ -62,7 +62,8 @@ def test_record_mode_missing_probe_blocks_before_worker_dispatch(monkeypatch):
 
 def test_run_expression_evaluates_inline_without_worker_dispatch(monkeypatch):
     server = jobserver.JobServer("127.0.0.1", 0)
-    source_checksum = Buffer({"a": "hello"}, "plain").get_checksum()
+    source = Buffer({"a": "hello"}, "plain")
+    source_checksum = source.get_checksum()
 
     async def _unexpected_dispatch(*args, **kwargs):
         raise AssertionError("expression evaluation must not use transformation workers")
@@ -355,7 +356,9 @@ def test_softcancel_last_member_cancels_dispatch(monkeypatch):
 
     result = asyncio.run(main())
     assert result.status == 200
-    assert result.text == "Transformation was canceled"
+    assert json.loads(result.text)["error"] == {
+        "kind": "canceled", "message": "Transformation was canceled"
+    }
     assert canceled == ["7" * 64]
 
 

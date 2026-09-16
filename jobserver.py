@@ -1,3 +1,4 @@
+from seamless.error_envelope import encode_error, WorkflowExecutionError
 from aiohttp import web
 import asyncio
 import contextlib
@@ -204,6 +205,16 @@ def pick_random_free_port(host: str, start: int, end: int) -> int:
     raise RuntimeError(f"No free port available in range {start}-{end}")
 
 
+def _expression_worker_status():
+    from seamless.checksum import expression
+
+    return expression._expression_evaluations
+
+
+class _JobNotStartedError(RuntimeError):
+    """A request failed preflight before worker execution began."""
+
+
 class JobServer:
     future = None
 
@@ -233,6 +244,7 @@ class JobServer:
         app = web.Application(client_max_size=10e9)
         app.add_routes(
             [
+                web.get("/status", self._status),
                 web.get("/", self._welcome),
                 web.get("/healthcheck", self._healthcheck),
                 web.get("/run-transformation", self._run_transformation),
@@ -313,6 +325,29 @@ class JobServer:
     async def _welcome(self, _):
         self._register_activity()
         return web.Response(status=200, body="Seamless jobserver is running")
+
+    async def _status(self, request):
+        from seamless.checksum import expression
+
+        counts = {}
+        try:
+            from seamless_dask.transformer_client import get_seamless_dask_client
+
+            client = get_seamless_dask_client()
+        except ImportError:
+            client = None
+        if client is not None:
+            counts = await asyncio.to_thread(
+                client.client.run, _expression_worker_status
+            )
+        return web.json_response(
+            {
+                "expression_evaluations": expression._expression_evaluations
+                + sum(counts.values()),
+                "local_expression_evaluations": expression._expression_evaluations,
+                "worker_expression_evaluations": counts,
+            }
+        )
 
     def _dask_transformation_status(self, tf_checksum):
         try:
@@ -496,6 +531,8 @@ class JobServer:
             transformation_dict = payload["transformation_dict"]
             tf_checksum = Checksum(payload["tf_checksum"])
             tf_dunder = payload.get("tf_dunder", {})
+            if not isinstance(transformation_dict, dict) or not isinstance(tf_dunder, dict):
+                raise ValueError("Transformation and dunder payloads must be objects")
             scratch = bool(payload.get("scratch", False))
             strict_dunder = bool(payload.get("strict_dunder", False))
             request_record_mode = bool(payload.get("record", False))
@@ -538,17 +575,25 @@ class JobServer:
             }
             self._active_transformations[tf_checksum_hex] = entry
         else:
-            print(f"[jobserver] Attached to transformation {tf_checksum_hex}", flush=True)
+            print(
+                f"[jobserver] Attached to transformation {tf_checksum_hex}", flush=True
+            )
         entry["members"].add(member_id)
         try:
             status, text = await entry["task"]
         except asyncio.CancelledError:
             entry["status"] = "canceled"
-            return web.Response(status=200, text="Transformation was canceled")
-        except Exception as exc:
+            return web.json_response(
+                encode_error(asyncio.CancelledError("Transformation was canceled"))
+            )
+        except _JobNotStartedError as exc:
             entry["status"] = "failed"
             entry["exception"] = exc
             return web.Response(status=500, text=str(exc))
+        except Exception as exc:
+            entry["status"] = "failed"
+            entry["exception"] = exc
+            return web.json_response(encode_error(exc))
         finally:
             self._detach_transformation_member(tf_checksum, member_id)
         if status >= 400:
@@ -589,12 +634,10 @@ class JobServer:
             if record_mode and not record_probe:
                 try:
                     await ensure_record_bucket_preconditions(
-                        transformation_dict,
-                        tf_dunder,
-                        execution="remote",
+                        transformation_dict, tf_dunder, execution="remote"
                     )
                 except Exception as exc:
-                    return 500, str(exc)
+                    raise _JobNotStartedError(str(exc)) from exc
             for attempt in range(2):
                 try:
                     result_checksum = await worker.dispatch_to_workers(
@@ -615,7 +658,7 @@ class JobServer:
                             flush=True,
                         )
                         continue
-                    return 500, error_text
+                    raise
 
                 if isinstance(result_checksum, str):
                     remote_job_dir = parse_remote_job_written(result_checksum)
@@ -634,7 +677,7 @@ class JobServer:
                             flush=True,
                         )
                         continue
-                    return 500, result_checksum
+                    raise WorkflowExecutionError(result_checksum)
                 break
         finally:
             gpu_memory_peak_bytes = stop_gpu_memory_sampler(gpu_sampler)
@@ -645,7 +688,9 @@ class JobServer:
                 f"[jobserver] Rejected canceled transformation {tf_checksum_hex}",
                 flush=True,
             )
-            return 200, "Transformation was canceled"
+            return 200, json.dumps(
+                encode_error(asyncio.CancelledError("Transformation was canceled"))
+            )
 
         assert result_checksum is not None
 
@@ -727,8 +772,7 @@ class JobServer:
         return 200, json.dumps(response_payload)
 
     async def _run_expression(self, request):
-        from seamless import Buffer, Checksum
-        from seamless.checksum.expression import evaluate_expression_async
+        from seamless import Checksum
 
         self._register_activity()
         try:
@@ -741,24 +785,26 @@ class JobServer:
             path = payload["path"]
             input_celltype = payload["input_celltype"]
             celltype = payload["celltype"]
+            if not all(
+                isinstance(value, str) for value in (path, input_celltype, celltype)
+            ):
+                raise ValueError("Expression fields must be strings")
         except Exception as exc:
             return web.Response(status=400, text=f"Invalid payload: {exc}")
 
         try:
-            try:
-                input_buffer = await input_checksum.resolution()
-            except Exception:
-                input_buffer = None
-            if isinstance(input_buffer, Buffer):
-                Buffer(input_buffer.content, checksum=input_checksum)
-            result_checksum = await evaluate_expression_async(
+            result_checksum = await worker.dispatch_expression(
                 input_checksum,
                 path,
                 input_celltype,
                 celltype,
+                validator=payload.get("validator"),
+                validator_language=payload.get("validator_language"),
             )
+        except asyncio.CancelledError as exc:
+            return web.json_response(encode_error(exc))
         except Exception as exc:
-            return web.Response(status=500, text=str(exc))
+            return web.json_response(encode_error(exc))
 
         return web.Response(
             status=200,

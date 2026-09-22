@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 from seamless import Buffer, Checksum, CacheMissError
 from seamless.checksum import expression as expression_mod
 
@@ -55,6 +57,30 @@ def test_invalid_expression_returns_structured_evaluation_error():
     assert body["error"]["kind"] == "expression_evaluation"
     assert "Unclosed path bracket" in body["error"]["message"]
     assert body["error"].get("checksum") is None
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason="contract ahead of code: jobserver does not forward Expression scratch",
+)
+def test_jobserver_forwards_the_requesters_scratch_decision(monkeypatch):
+    server = jobserver.JobServer("127.0.0.1", 0)
+    source_checksum = Checksum("d" * 64)
+    observed = []
+
+    async def dispatch(*args, **kwargs):
+        observed.append(kwargs)
+        return Checksum("e" * 64)
+
+    monkeypatch.setattr(jobserver.worker, "dispatch_expression", dispatch)
+    payload = {**_payload(source_checksum), "scratch": True}
+
+    response = asyncio.run(server._run_expression(_FakeRequest(payload)))
+
+    assert response.status == 200
+    assert observed == [
+        {"validator": None, "validator_language": None, "scratch": True}
+    ]
 
 
 def test_jobserver_merges_duplicate_requests(monkeypatch):

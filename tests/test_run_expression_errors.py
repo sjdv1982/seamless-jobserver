@@ -59,10 +59,6 @@ def test_invalid_expression_returns_structured_evaluation_error():
     assert body["error"].get("checksum") is None
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="contract ahead of code: jobserver does not forward Expression scratch",
-)
 def test_jobserver_forwards_the_requesters_scratch_decision(monkeypatch):
     server = jobserver.JobServer("127.0.0.1", 0)
     source_checksum = Checksum("d" * 64)

@@ -800,7 +800,7 @@ class JobServer:
                 celltype,
                 validator=payload.get("validator"),
                 validator_language=payload.get("validator_language"),
-                scratch=payload.get("scratch", True),
+                scratch=payload.get("scratch", False),
             )
         except asyncio.CancelledError as exc:
             return web.json_response(encode_error(exc))

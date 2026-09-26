@@ -243,15 +243,17 @@ def test_jobserver_softcancel_noop_on_unknown_member_and_completed_run(server):
 
 def test_jobserver_softcancel_requires_a_member_id(server):
     """A caller only ever softcancels its *own* participation: a softcancel
-    without a member id is rejected, not treated as a kill."""
+    without a member id deregisters nobody, so it is never treated as a kill.
+    (How the request is answered is not contract.)"""
     tfc = "8" * 64
 
     async def main():
         a = _run(server, tfc, "member-a")
         await _both_attached(server, tfc, n=1)
-        resp = await _softcancel(server, tfc, None)
-        assert resp.status == 400
+        await _softcancel(server, tfc, None)
+        assert server._active_transformations[tfc]["members"] == {"member-a"}
         assert not server._gate.cancelled
+        assert server._worker_kills == []
         server._gate.release.set()
         assert (await a).status == 200
 
@@ -277,3 +279,27 @@ def test_jobserver_resubmission_after_leaf_kill_is_a_fresh_run(server):
 
     asyncio.run(main())
     assert server._gate.calls == 2
+
+
+def test_jobserver_disconnect_cannot_cancel_the_shared_task(monkeypatch):
+    """Guard for the latent hazard in cancellation.md ("Implementation status",
+    informational, not a contract statement): ``_run_transformation`` awaits the
+    shared job task unshielded, so aiohttp's ``handler_cancellation`` would turn
+    one client's disconnect into a peer kill (against constraint 2). The option
+    must therefore stay off until that await is shielded."""
+
+    class _Stop(Exception):
+        pass
+
+    seen = {}
+
+    def recording_runner(app, *args, **kwargs):
+        seen["kwargs"] = kwargs
+        raise _Stop
+
+    monkeypatch.setattr(jobserver, "is_port_in_use", lambda *_a, **_k: False)
+    monkeypatch.setattr(jobserver.web, "AppRunner", recording_runner)
+    srv = jobserver.JobServer("127.0.0.1", 0)
+    with pytest.raises(_Stop):
+        asyncio.run(srv._start())
+    assert seen["kwargs"].get("handler_cancellation", False) is False

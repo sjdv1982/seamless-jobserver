@@ -84,7 +84,7 @@ def test_jobserver_merges_duplicate_requests(monkeypatch):
     source = Buffer({"a": "one evaluation"}, "plain")
     source_checksum = source.get_checksum()
     source_ref = source.tempref()
-    original_evaluate = expression_mod.evaluate_expression_async
+    original_evaluate = expression_mod.evaluate_expression_local_async
     original_finish = expression_mod._evaluate_expression_after_validation
     both_entered = asyncio.Event()
     entered = 0
@@ -104,7 +104,7 @@ def test_jobserver_merges_duplicate_requests(monkeypatch):
         return original_finish(*args, **kwargs)
 
     monkeypatch.setattr(
-        expression_mod, "evaluate_expression_async", synchronized_evaluate
+        expression_mod, "evaluate_expression_local_async", synchronized_evaluate
     )
     monkeypatch.setattr(
         expression_mod, "_evaluate_expression_after_validation", count_evaluation

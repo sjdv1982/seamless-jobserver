@@ -373,7 +373,7 @@ class JobServer:
                 return "canceled"
             if not futures.base.done() or not futures.thin.done():
                 return "running"
-            _tf_checksum, result_checksum, exc = futures.thin.result()
+            _tf_checksum, result_checksum, exc, _logs = futures.thin.result()
             if exc:
                 return "failed"
             if result_checksum:
@@ -628,6 +628,7 @@ class JobServer:
         gpu_sampler = start_gpu_memory_sampler()
         gpu_memory_peak_bytes = None
         result_checksum = None
+        logs = None
         retry_count = 0
         try:
             record_mode = get_record_mode()
@@ -641,12 +642,13 @@ class JobServer:
                     raise _JobNotStartedError(str(exc)) from exc
             for attempt in range(2):
                 try:
-                    result_checksum = await worker.dispatch_to_workers(
+                    result_checksum, logs = await worker.dispatch_to_workers(
                         transformation_dict,
                         tf_checksum=tf_checksum,
                         tf_dunder=tf_dunder,
                         scratch=scratch,
                         strict_dunder=strict_dunder,
+                        with_logs=True,
                     )
                 except Exception as exc:
                     error_text = str(exc)
@@ -716,6 +718,7 @@ class JobServer:
         response_payload = {
             "result_checksum": result_checksum.hex(),
             "record_runtime": record_runtime,
+            "logs": logs,
         }
         if record_mode and not record_probe:
             from seamless_transformer.transformation_cache import (

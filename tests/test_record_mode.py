@@ -221,7 +221,7 @@ def test_duplicate_transformations_share_one_dispatch(monkeypatch):
         calls.append(kwargs["tf_checksum"].hex())
         started.set()
         await release.wait()
-        return Checksum("5" * 64)
+        return Checksum("5" * 64), {"stdout": "", "stderr": ""}
 
     monkeypatch.setattr(jobserver, "_STARTUP_RECORD_MODE", False)
     monkeypatch.setattr(jobserver, "get_record_mode", lambda: False)

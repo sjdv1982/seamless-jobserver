@@ -249,6 +249,7 @@ class JobServer:
                 web.get("/healthcheck", self._healthcheck),
                 web.get("/run-transformation", self._run_transformation),
                 web.get("/run-expression", self._run_expression),
+                web.get("/run-celljoin", self._run_celljoin),
                 web.get(
                     "/transformation-status/{tf_checksum}",
                     self._transformation_status,
@@ -801,6 +802,43 @@ class JobServer:
                 validator=payload.get("validator"),
                 validator_language=payload.get("validator_language"),
                 scratch=payload.get("scratch", False),
+            )
+        except asyncio.CancelledError as exc:
+            return web.json_response(encode_error(exc))
+        except Exception as exc:
+            return web.json_response(encode_error(exc))
+
+        return web.Response(
+            status=200,
+            text=json.dumps({"result_checksum": result_checksum.hex()}),
+        )
+
+    async def _run_celljoin(self, request):
+        from seamless import Checksum
+
+        self._register_activity()
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+        try:
+            checksum_value = payload["celljoin_checksum"]
+            celltype = payload["celltype"]
+            scratch = payload.get("scratch", False)
+            if not isinstance(checksum_value, str):
+                raise ValueError("celljoin_checksum must be a string")
+            if not isinstance(celltype, str):
+                raise ValueError("celltype must be a string")
+            if not isinstance(scratch, bool):
+                raise ValueError("scratch must be a boolean")
+            celljoin_checksum = Checksum(checksum_value)
+        except Exception as exc:
+            return web.Response(status=400, text=f"Invalid payload: {exc}")
+
+        try:
+            result_checksum = await worker.dispatch_celljoin(
+                celljoin_checksum, celltype, scratch=scratch
             )
         except asyncio.CancelledError as exc:
             return web.json_response(encode_error(exc))

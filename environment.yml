@@ -11,7 +11,7 @@ dependencies:
   - pip
   - pip:
       - -e .
-      - -e ./seamless-base
-      - -e ./seamless-transformer
-      - -e ./seamless-config
-      - -e ./seamless-remote
+      - -e ../seamless-core
+      - -e ../seamless-transformer
+      - -e ../seamless-config
+      - -e ../seamless-remote

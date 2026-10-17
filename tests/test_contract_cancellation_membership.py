@@ -57,7 +57,10 @@ class _Gate:
         except asyncio.CancelledError:
             self.cancelled = True
             raise
-        return Checksum(RESULT)
+        result = Checksum(RESULT)
+        if kwargs.get("with_logs", False):
+            return result, None
+        return result
 
 
 @pytest.fixture
